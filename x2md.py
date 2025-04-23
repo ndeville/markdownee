@@ -11,8 +11,16 @@ import argparse
 
 ####################
 # CONVERT ANY DOCUMENT TO MARKDOWN
-# USING MICROSOFT'S MARKITDOWN LIBRARY
-# https://github.com/microsoft/markitdown
+
+"""
+Libraries at play or tested:
+
+MICROSOFT'S MARKITDOWN LIBRARY: https://github.com/microsoft/markitdown
+MEGAPARSE: https://github.com/QuivrHQ/MegaParse
+
+
+
+"""
 
 # IMPORTS
 

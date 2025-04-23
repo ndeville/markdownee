@@ -27,3 +27,13 @@ def extract_text_from_url(url):
     
     except subprocess.CalledProcessError as e:
         raise Exception(f"Failed to fetch URL with curl: {e}")
+    
+
+
+
+
+if __name__ == '__main__':
+
+    url = "https://www.annoto.net/"
+
+    print(extract_text_from_url(url))
