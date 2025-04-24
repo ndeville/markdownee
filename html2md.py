@@ -72,7 +72,7 @@ if __name__ == "__main__":
     try:
         # Convert specific div with default blacklist and end marker
         markdown = html_to_markdown(
-            "/Users/nic/dl/kaltura-knowledge/knowledge.kaltura.com/3d-object-entry-overview-of-the-brand3d-integration-with-kaltura-mediaspace.html",
+            "/Users/nic/dl/kaltura-knowledge/knowledge.kaltura.com/version-169---feb-3-2019.html",
             div_class="hg-article-body",
             end_marker="Was this article helpful?"
         )
