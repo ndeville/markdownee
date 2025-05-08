@@ -34,6 +34,6 @@ def extract_text_from_url(url):
 
 if __name__ == '__main__':
 
-    url = "https://www.annoto.net/"
+    url = "https://www.30mpc.com/newsletter/the-perfect-outbound-sequence-template"
 
     print(extract_text_from_url(url))

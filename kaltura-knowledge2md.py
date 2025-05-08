@@ -9,12 +9,17 @@ import os
 from datetime import datetime
 import time
 
+import ollama
+
 from html2md import html_to_markdown
 
 # Start timing the execution
 start_time = time.time()
 ts_time = f"{datetime.now().strftime('%H:%M:%S')}"
 print(f"\n---------- {ts_time} starting kaltura-knowledge2md.py")
+
+# Define the AI model to use
+ai_model = "llama3.3"
 
 # Counter for files
 count_file = 0
@@ -42,16 +47,18 @@ def should_skip_file(file_path):
     return any(blacklisted in file_path_lower for blacklisted in blacklist_files)
 
 def process_kaltura_knowledge_files():
-    global count_file, processed_files, count_errors, skipped_files
+    global count_file, processed_files, count_errors, skipped_files, ai_model
 
     # Define source and destination paths
     source_dir = "/Users/nic/dl/kaltura-knowledge/knowledge.kaltura.com"
-    output_file = "/Users/nic/Dropbox/Kaltura/ai/kaltura-knowledge-base.md"
-    
-    # Create a list to store all markdown content
-    all_markdown = []
+    output_file = f"/Users/nic/Dropbox/Kaltura/ai/kaltura-knowledge-base_{ai_model}.md"
     
     print(f"\nℹ️  Processing HTML files from: {source_dir}\n\n")
+    
+    # Open the output file in write mode and write the initial content
+    with open(output_file, 'w', encoding='utf-8') as f:
+        f.write(f"# Kaltura Knowledge Base\n\n")
+        f.write(f"Generated on {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n")
     
     # Walk through all files in the source directory in alphabetical order
     for root, _, files in os.walk(source_dir):
@@ -67,7 +74,7 @@ def process_kaltura_knowledge_files():
                     print(f"{count_file}/{len(files):,} ⏭️  Skipped blacklisted file #{skipped_files}: {html_file_path}")
                     continue
                 
-                
+                print(f"\n\n\n>>> HTML: {html_file_path}")
                 try:
                     # Convert HTML to Markdown
                     markdown_content = html_to_markdown(
@@ -75,35 +82,53 @@ def process_kaltura_knowledge_files():
                         div_class="hg-article-body",
                         end_marker="Was this article helpful?"
                     )
+
+                    print(f"\n\n\n>> markdown_content:\n\n{markdown_content}")
+
+                    ollama_response = ollama.generate(ai_model, f"""This is an extract from the HTML file of a Kaltura Knowledge Base article.
+
+Please clean up the markdown content to make it more readable and easier to understand.
+
+Do not change the content of the article.
+Do not add any new content.
+Only make it more readable.
+And make sure all headers returned start at level 3 (ie header 3, or "###")
+Remove any markdown link, only keep the text of the link.
+Remove also any link to images (like `![](https://dyzz9obi78pm5.cloudfront.net/app/image/id/62013034399016a1057b27fd/n/media-entry-page.jpg)`) as we want a clean markdown file, with text only.
+You can also remove contextual information like "This document is maintained by Kaltura's Knowledge team. Please send comments or corrections to knowledge@kaltura.com. We are committed to improving our documentation and your feedback is appreciated." or "Download PDF"
+Do not return anything else than the cleaned up markdown content. 
+
+Here is the markdown content:
+
+{markdown_content}
+""")
+
+                    markdown_content_cleaned_by_ollama = ollama_response.response
+
+                    print(f"\n\n\n>> markdown_content_cleaned_by_ollama:\n\n{markdown_content_cleaned_by_ollama}")
                     
-                    # Add file information and content to the collection
-                    file_header = f"\n\n## {relative_path}\n\n"
-                    all_markdown.append(file_header + markdown_content)
+                    # Append the processed content to the file
+                    with open(output_file, 'a', encoding='utf-8') as f:
+                        file_header = f"\n\n## from {relative_path}\n\n"
+                        f.write(file_header + markdown_content_cleaned_by_ollama)
                     
-                    print(f"{count_file}/{len(files):,} ✅ processed file: {html_file_path}")
+                    print(f"\n\n{count_file}/{len(files):,} ✅ processed file: {html_file_path}")
                     processed_files += 1
-                    # if processed_files % 10 == 0:
-                    #     print(f"Processed {processed_files} files...")
                         
                 except Exception as e:
                     print(f"{count_file}/{len(files):,} ❌ Error processing file: {html_file_path} with error: {e}")
                     list_files_with_errors.append(html_file_path)
                     count_errors += 1
     
-    # Write all markdown content to the output file
-    with open(output_file, 'w', encoding='utf-8') as f:
-        # Add a title and timestamp
-        f.write(f"# Kaltura Knowledge Base\n\n")
-        f.write(f"_Generated on {datetime.now().strftime('%Y-%m-%d %H:%M')}_\n\n")
-        f.write("".join(all_markdown))
-    
     print(f"\n✅ Processed {processed_files} HTML files")
     print(f"⏭️  Skipped {skipped_files} blacklisted files")
 
     # Convert .md to .txt
     txt_file = output_file.replace(".md", ".txt")
+    with open(output_file, 'r', encoding='utf-8') as f:
+        content = f.read()
     with open(txt_file, 'w', encoding='utf-8') as f:
-        f.write("".join(all_markdown))
+        f.write(content)
     # Delete .md file
     os.remove(output_file)
 

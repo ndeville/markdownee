@@ -26,3 +26,9 @@ def create_markdown_from_file(file_path):
         md_file.write(markdown_content)
 
     return markdown_file_path
+
+
+if __name__ == '__main__':
+    file_path = input("\n> Enter the path to the file to convert: ")
+    markdown_file_path = create_markdown_from_file(file_path)
+    print(f"\n✅ Markdown file generated: {markdown_file_path}\n")
