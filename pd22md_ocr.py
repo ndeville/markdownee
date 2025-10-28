@@ -18,7 +18,7 @@ from PIL import Image
 import pytesseract
 
 # --------- Hardcoded paths (edit these) ----------
-PDF_PATH = "/Users/nic/Dropbox/Kaltura/clients/puig/250904 Puig Streaming Requirements_en.pdf"
+PDF_PATH = "/Users/nic/Dropbox/Kaltura/clients/dbsystel/Anlage 1 Leistungsbeschreibung.pdf"
 OUTPUT_PATH = os.path.splitext(PDF_PATH)[0] + "_extracted.md"
 # Optional: if tesseract isn't on PATH, set the binary explicitly:
 # pytesseract.pytesseract.tesseract_cmd = "/opt/homebrew/bin/tesseract"

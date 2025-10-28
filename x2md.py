@@ -37,7 +37,6 @@ import os
 
 
 
-
 def save_to_markdown(text, filename='output.md'):
     with open(filename, 'w', encoding='utf-8') as f:
         f.write(f'```\n{text}\n```')
