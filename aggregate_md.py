@@ -20,7 +20,7 @@ count_row = 0
 count_total = 0
 count = 0
 
-def aggregate_md_files(folder_path: str, output_file: str = None) -> str:
+def aggregate_md_files(folder_path: str, output_file: str = None, website_url: str = None) -> str:
     """
     Aggregate all .md files in a folder (and subfolders) into a single .md file.
     
@@ -31,6 +31,10 @@ def aggregate_md_files(folder_path: str, output_file: str = None) -> str:
     Returns:
         str: Path to combined .md file
     """
+
+    if website_url is not None:
+        website_url = website_url.rstrip("/")
+
     folder = Path(folder_path)
     
     if not folder.exists():
@@ -90,7 +94,7 @@ This combined document serves as a complete textual representation of the {folde
 
 ### Document Structure
 
-- **Source**: {folder_path}
+- **Source**: {website_url}
 - **Total pages**: {len(md_files)}
 - **Generated**: {datetime.now().strftime("%Y-%m-%d %H:%M")}
 
@@ -159,7 +163,11 @@ if __name__ == '__main__':
     # print(f"count_total:\t{count_total:,}")
     # print(f"count:\t\t{count:,}")
 
-    input_folder = "/Users/nic/dl/telekom-mms-website"
+    """ CONFIGURATION """
+    input_folder = "/Users/nic/dl/engie-b2c-website"
+    # website_url = "https://www.abb.com"
+    """"""
+
     output_folder = "/Users/nic/ai/websites"
 
     aggregate_md_files(input_folder, output_folder)

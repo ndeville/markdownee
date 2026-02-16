@@ -32,6 +32,10 @@ Usage:
   python playwright_site_to_markdown.py https://corp.kaltura.com ./out
 """
 
+"""
+2026-01-26 UPDATE: now run using Alfred `web2md` which takes the active Chrome window as input
+"""
+
 # GLOBALS
 
 test = 1
@@ -41,14 +45,14 @@ count_row = 0
 count_total = 0
 count = 0
 
-
 # IMPORTS
 
 import asyncio
 import sys
 import os
 import re
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, unquote
+import subprocess
 
 from playwright.async_api import async_playwright
 from bs4 import BeautifulSoup
@@ -56,15 +60,83 @@ from markdownify import markdownify as md
 
 from aggregate_md import aggregate_md_files
 
+# Define a set of file extensions to skip (non-HTML resources).
+SKIP_EXTENSIONS = {
+    ".pdf", ".mp4", ".mov", ".avi", ".mp3", ".wav", ".zip", ".tar", ".gz", ".rar", ".7z",
+    ".exe", ".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx", ".rtf", ".odt", ".swf",
+    ".apk", ".dmg", ".iso", ".ogg", ".webm", ".mkv", ".flv", ".wmv", ".m4v"
+}
+
+import requests
+import xml.etree.ElementTree as ET
+
+def get_sitemap_urls(base_url: str, domain: str) -> set[str]:
+    urls = set()
+    sitemap_locations = [
+        f"{base_url}/sitemap.xml",
+        f"{base_url}/sitemap_index.xml",
+        f"{base_url}/sitemap/sitemap.xml",
+    ]
+    
+    for sitemap_url in sitemap_locations:
+        try:
+            resp = requests.get(sitemap_url, timeout=10)
+            if resp.status_code == 200:
+                root = ET.fromstring(resp.content)
+                # Handle both sitemap index and regular sitemaps
+                for elem in root.iter():
+                    if elem.tag.endswith('loc'):
+                        url = elem.text.strip()
+                        if urlparse(url).netloc == domain:
+                            urls.add(url)
+        except:
+            continue
+    
+    print(f"📍 Found {len(urls)} URLs from sitemaps")
+    return urls
+
+
+
+
+def should_skip_url(url: str) -> bool:
+    """Return True if URL points to a non-HTML resource (e.g. PDF, video, doc)."""
+    parsed = urlparse(url)
+    path = parsed.path.lower()
+    for ext in SKIP_EXTENSIONS:
+        if path.endswith(ext):
+            return True
+    # Some URLs might include filetype with query string (e.g. /file.pdf?download=1)
+    if re.search(r"\.(" + "|".join(re.escape(ext.lstrip(".")) for ext in SKIP_EXTENSIONS) + r")(\?|$)", path):
+        return True
+    return False
+
+# FUNCTIONS
+
+def get_chrome_active_tab_url():
+    try:
+        script = '''
+        tell application "Google Chrome"
+            set activeTabUrl to URL of active tab of front window
+            return activeTabUrl
+        end tell
+        '''
+        result = subprocess.run(['osascript', '-e', script], capture_output=True, text=True)
+        url = result.stdout.strip()
+        print(f"\n🚹  Active tab URL: {url}")
+        return url
+    except Exception as e:
+        print(f"Error: {e}")
+        return None
+
 # MAIN
 
-START_URL = "https://www.parloa.com"
-FINAL_DIR = "" # for final .md file
-MAX_PAGES = 5000  # safety limit
+# START_URL = input(f"\nEnter URL: ")
+START_URL = get_chrome_active_tab_url()
+
+MAX_PAGES = 10000  # safety limit
 
 count = 0
 count_total = 0
-
 
 def url_to_dl_folder(url: str, base_dir: str = "/Users/nic/dl") -> str:
     domain = urlparse(url).netloc.replace("www.", "")
@@ -76,15 +148,47 @@ def url_to_final_folder(url: str, base_dir: str = "/Users/nic/ai/websites") -> s
     name = domain.rsplit(".", 1)[0]  # Remove TLD only
     return f"{base_dir}/{name}"
 
+def safe_path(path: str) -> str:
+    """
+    Sanitizes a file path for writing, preserving subfolders.
+    """
+    parts = []
+    for part in path.split("/"):
+        if not part:
+            continue
+        safe = re.sub(r"[^\w\-]", "_", unquote(part))
+        parts.append(safe)
+    if not parts:
+        return "index"
+    return os.path.join(*parts)
 
-def clean_filename(url: str) -> str:
+def clean_filepath(url: str) -> str:
+    """
+    Build a (sanitized) path (with subdirectories) from a URL.
+    - root index is index.md
+    - folders/names preserved
+    - last part = filename (with .md), folders preserved
+    """
     parsed = urlparse(url)
     path = parsed.path.strip("/")
     if not path:
-        path = "index"
-    path = re.sub(r"[^\w\-\/]", "_", path)
-    return path.rstrip("/") + ".md"
-
+        return "index.md"
+    # If ends with "/", treat as folder: add index.md
+    if path.endswith("/"):
+        folder = safe_path(path)
+        return os.path.join(folder, "index.md")
+    # If no extension, treat as folder: add index.md
+    if "." not in os.path.basename(path):
+        folder = safe_path(path)
+        return os.path.join(folder, "index.md")
+    # else preserve subfolders, but .ext → .md
+    folder, filename = os.path.split(path)
+    filename_root = os.path.splitext(filename)[0]
+    filename_md = re.sub(r"[^\w\-]", "_", unquote(filename_root)) + ".md"
+    if folder:
+        return os.path.join(safe_path(folder), filename_md)
+    else:
+        return filename_md
 
 def extract_links(html: str, base_url: str, domain: str) -> set[str]:
     soup = BeautifulSoup(html, "html.parser")
@@ -98,11 +202,14 @@ def extract_links(html: str, base_url: str, domain: str) -> set[str]:
         abs_url = urljoin(base_url, href)
         parsed = urlparse(abs_url)
 
+        # Only follow links on the same domain
         if parsed.netloc == domain:
+            # Skip links to files we don't want to download (PDFs, videos, etc)
+            if should_skip_url(abs_url):
+                continue
             links.add(parsed.scheme + "://" + parsed.netloc + parsed.path)
 
     return links
-
 
 def extract_main_content(html: str) -> str:
     soup = BeautifulSoup(html, "html.parser")
@@ -147,9 +254,7 @@ def extract_main_content(html: str) -> str:
 
     return str(main_content)
 
-
 OUT_DIR = url_to_dl_folder(START_URL)
-
 
 async def crawl():
     global count, count_total
@@ -159,6 +264,7 @@ async def crawl():
     visited = set()
     to_visit = [START_URL]
     domain = urlparse(START_URL).netloc
+    to_visit.extend(get_sitemap_urls(START_URL, domain))
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
@@ -170,25 +276,33 @@ async def crawl():
             if url in visited:
                 continue
 
+            # Skip fetching if the URL is a known non-HTML resource (pdf, video, etc.)
+            if should_skip_url(url):
+                print(f"  ↩️  Skipping non-HTML resource: {url}")
+                continue
+
             count_total += 1
 
             print(f"→ Fetching #{count_total}: {url}")
             visited.add(url)
 
             try:
-                await page.goto(url, wait_until="networkidle", timeout=60000)
+                await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                # Give JS a moment to render dynamic content
+                await page.wait_for_timeout(3000)
                 html = await page.content()
             except Exception as e:
                 print(f"  ! Failed: {e}")
                 continue
 
             main_html = extract_main_content(html)
-            markdown = md(main_html, heading_style="ATX", strip=["a"])  # Optional: strip links
+            markdown = md(main_html, heading_style="ATX", strip=["a"])
 
             # Clean up excessive whitespace
             markdown = re.sub(r"\n{3,}", "\n\n", markdown).strip()
 
-            outfile = os.path.join(OUT_DIR, clean_filename(url))
+            relative_outfile = clean_filepath(url)
+            outfile = os.path.join(OUT_DIR, relative_outfile)
             os.makedirs(os.path.dirname(outfile), exist_ok=True)
 
             with open(outfile, "w", encoding="utf-8") as f:
@@ -205,19 +319,13 @@ async def crawl():
 
     print(f"\n✅ Done! Saved {count}/{count_total} pages to {OUT_DIR}")
 
-
 asyncio.run(crawl())
-
-
 
 # Aggregate output
 
 FINAL_DIR = url_to_final_folder(START_URL)
 
-aggregate_md_files(OUT_DIR, FINAL_DIR)
-
-
-
+aggregate_md_files(OUT_DIR, FINAL_DIR + ".md", START_URL)
 
 ########################################################################################################
 
