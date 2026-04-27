@@ -1,17 +1,20 @@
 """
 x2md - Convert documents (PDF, DOCX, PPTX, TXT) to Markdown.
 
-Runs multiple conversion backends in parallel, then uses Claude to merge
-the best elements from each into a single clean Markdown output.
+Default mode: MarkItDown only (fast, no API call).
+Claude mode: runs multiple backends in parallel, merges via Claude.
+Firecrawl mode: uploads file to temp hosting, parses via Firecrawl Document Parsing API.
 
 Usage:
-    python x2md.py document.pdf
-    python x2md.py presentation.pptx
-    python x2md.py report.docx
+    python x2md.py                       # markitdown only (default)
+    python x2md.py --claude              # multi-backend + Claude merge
+    python x2md.py --firecrawl           # Firecrawl document parsing
 
 As a module:
     from x2md import convert2md
-    markdown = convert2md("/path/to/file.pdf")
+    markdown_text = convert2md("/path/to/file.pdf")                    # markitdown only
+    markdown_text = convert2md("/path/to/file.pdf", claude=True)       # multi-backend + merge
+    markdown_text = convert2md("/path/to/file.pdf", firecrawl=True)    # Firecrawl parsing
 """
 
 from datetime import datetime
@@ -20,6 +23,7 @@ import sys
 import time
 import argparse
 import re
+import subprocess
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -50,6 +54,29 @@ def detect_file_type(file_path: str) -> str:
     return Path(file_path).suffix.lower()
 
 
+# Matches data URIs (base64-encoded images, fonts, etc.) and long hex/base64 blobs
+_BASE64_PATTERN = re.compile(
+    r'(?:'
+    r'!\[[^\]]*\]\(data:[^)]+\)'           # ![alt](data:image/...;base64,...)
+    r'|'
+    r'src=["\']data:[^"\']+["\']'           # src="data:image/...;base64,..."
+    r'|'
+    r'url\(data:[^)]+\)'                    # url(data:image/...;base64,...)
+    r'|'
+    r'\(data:[\w/;,+=\-]+\)'               # (data:image/png;base64,iVBOR...)
+    r'|'
+    r'data:[\w/]+;base64,[A-Za-z0-9+/=]{100,}'  # bare data:...;base64,... strings
+    r')',
+    re.DOTALL,
+)
+
+
+def _strip_base64(text: str) -> str:
+    """Remove embedded base64 data URIs and long binary blobs from markdown."""
+    cleaned = _BASE64_PATTERN.sub('[embedded image removed]', text)
+    return cleaned
+
+
 # ---------------------------------------------------------------------------
 # Converter backends
 # ---------------------------------------------------------------------------
@@ -62,9 +89,9 @@ def convert_markitdown(file_path: str) -> str | None:
         result = md.convert(file_path)
         text = result.text_content
         if text and text.strip():
-            return text.strip()
+            return _strip_base64(text.strip())
     except Exception as e:
-        print(f"  [markitdown] failed: {e}", file=sys.stderr)
+        print(f"  ❌ [markitdown] failed: {e}", file=sys.stderr)
     return None
 
 
@@ -78,9 +105,9 @@ def convert_pymupdf4llm(file_path: str) -> str | None:
             force_text=True,
         )
         if text and text.strip():
-            return text.strip()
+            return _strip_base64(text.strip())
     except Exception as e:
-        print(f"  [pymupdf4llm] failed: {e}", file=sys.stderr)
+        print(f"  ❌ [pymupdf4llm] failed: {e}", file=sys.stderr)
     return None
 
 
@@ -92,9 +119,9 @@ def convert_mammoth(file_path: str) -> str | None:
             result = mammoth.convert_to_markdown(f)
             text = result.value
             if text and text.strip():
-                return text.strip()
+                return _strip_base64(text.strip())
     except Exception as e:
-        print(f"  [mammoth] failed: {e}", file=sys.stderr)
+        print(f"  ❌ [mammoth] failed: {e}", file=sys.stderr)
     return None
 
 
@@ -145,9 +172,9 @@ def convert_pdfplumber(file_path: str) -> str | None:
                     parts.append(f"<!-- Page {i + 1} -->\n\n" + '\n\n'.join(page_parts))
 
         if parts:
-            return '\n\n---\n\n'.join(parts)
+            return _strip_base64('\n\n---\n\n'.join(parts))
     except Exception as e:
-        print(f"  [pdfplumber] failed: {e}", file=sys.stderr)
+        print(f"  ❌ [pdfplumber] failed: {e}", file=sys.stderr)
     return None
 
 
@@ -210,9 +237,9 @@ def convert_pptx_native(file_path: str) -> str | None:
             parts.append('\n\n'.join(slide_parts))
 
         if parts:
-            return '\n\n---\n\n'.join(parts)
+            return _strip_base64('\n\n---\n\n'.join(parts))
     except Exception as e:
-        print(f"  [pptx-native] failed: {e}", file=sys.stderr)
+        print(f"  ❌ [pptx-native] failed: {e}", file=sys.stderr)
     return None
 
 
@@ -274,9 +301,9 @@ def convert_docx_native(file_path: str) -> str | None:
                         parts.append(md_table)
 
         if parts:
-            return '\n\n'.join(parts)
+            return _strip_base64('\n\n'.join(parts))
     except Exception as e:
-        print(f"  [docx-native] failed: {e}", file=sys.stderr)
+        print(f"  ❌ [docx-native] failed: {e}", file=sys.stderr)
     return None
 
 
@@ -298,6 +325,57 @@ def _format_docx_runs(para) -> str:
     return result if result else para.text.strip()
 
 
+FIRECRAWL_SUPPORTED_EXTENSIONS = {'.pdf', '.docx', '.doc', '.odt', '.rtf', '.xlsx', '.xls'}
+
+
+def convert_firecrawl(file_path: str) -> str | None:
+    """Firecrawl Document Parsing API - uploads to temp hosting, parses to markdown."""
+    try:
+        import requests
+        from firecrawl import Firecrawl
+
+        api_key = os.environ.get('FIRECRAWL_API_KEY_MARKDOWNEE')
+        if not api_key:
+            print("  ❌ [firecrawl] FIRECRAWL_API_KEY_MARKDOWNEE not set", file=sys.stderr)
+            return None
+
+        file_name = os.path.basename(file_path)
+        print(f"  📤 [firecrawl] uploading {file_name} to temporary hosting...")
+        with open(file_path, 'rb') as f:
+            upload_resp = requests.post(
+                'https://file.io',
+                files={'file': (file_name, f)},
+                timeout=120,
+            )
+
+        if not upload_resp.ok:
+            print(f"  ❌ [firecrawl] file upload failed: {upload_resp.status_code}", file=sys.stderr)
+            return None
+
+        file_url = upload_resp.json().get('link')
+        if not file_url:
+            print(f"  ❌ [firecrawl] no URL returned from file upload", file=sys.stderr)
+            return None
+
+        print(f"  🔗 [firecrawl] uploaded, scraping via Firecrawl...")
+
+        fc = Firecrawl(api_key=api_key)
+        ext = Path(file_path).suffix.lower()
+        parsers = None
+        if ext == '.pdf':
+            parsers = [{"type": "pdf", "mode": "auto"}]
+
+        result = fc.scrape(file_url, formats=['markdown'], parsers=parsers)
+        text = result.markdown
+        if text and text.strip():
+            return _strip_base64(text.strip())
+        print(f"  ⚠️ [firecrawl] returned empty markdown", file=sys.stderr)
+
+    except Exception as e:
+        print(f"  ❌ [firecrawl] failed: {e}", file=sys.stderr)
+    return None
+
+
 def convert_text_direct(file_path: str) -> str | None:
     """Direct read for text-based files."""
     try:
@@ -310,11 +388,11 @@ def convert_text_direct(file_path: str) -> str | None:
             with open(file_path, 'r', encoding='latin-1') as f:
                 text = f.read()
             if text and text.strip():
-                return text.strip()
+                return _strip_base64(text.strip())
         except Exception as e:
-            print(f"  [text-direct] failed: {e}", file=sys.stderr)
+            print(f"  ❌ [text-direct] failed: {e}", file=sys.stderr)
     except Exception as e:
-        print(f"  [text-direct] failed: {e}", file=sys.stderr)
+        print(f"  ❌ [text-direct] failed: {e}", file=sys.stderr)
     return None
 
 
@@ -380,7 +458,11 @@ def merge_with_claude(
     """Send multiple converter outputs to Claude and get a merged best version."""
     try:
         import anthropic
-        client = anthropic.Anthropic()
+        api_key = os.environ.get('ANTHROPIC_API_KEY')
+        if not api_key:
+            print("  ❌ [claude-merge] ANTHROPIC_API_KEY not set", file=sys.stderr)
+            return None
+        client = anthropic.Anthropic(api_key=api_key)
 
         # Build the prompt with each converter's output
         sections = []
@@ -401,21 +483,28 @@ def merge_with_claude(
 
         # Check total size - if too large, use extended thinking or trim
         total_chars = len(user_prompt)
-        print(f"  [claude-merge] sending {total_chars:,} chars from {len(results)} converters")
+        print(f"  🤖 [claude-merge] sending {total_chars:,} chars from {len(results)} converters")
 
-        response = client.messages.create(
+        raw_response = client.messages.with_raw_response.create(
             model=model,
             max_tokens=16384,
             system=MERGE_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_prompt}],
         )
+        request_id = raw_response.http_response.headers.get('request-id', 'unknown')
+        response = raw_response.parse()
+        input_tokens = response.usage.input_tokens
+        output_tokens = response.usage.output_tokens
+        print(f"  🆔 [claude-merge] request_id: {request_id}")
+        cost = (input_tokens * 5 + output_tokens * 25) / 1_000_000
+        print(f"  📊 [claude-merge] tokens: {input_tokens:,} in / {output_tokens:,} out ({input_tokens + output_tokens:,} total) - ${cost:.4f}")
 
         merged = response.content[0].text
         if merged and merged.strip():
             return merged.strip()
 
     except Exception as e:
-        print(f"  [claude-merge] failed: {e}", file=sys.stderr)
+        print(f"  ❌ [claude-merge] failed: {e}", file=sys.stderr)
     return None
 
 
@@ -423,11 +512,12 @@ def merge_with_claude(
 # Core conversion logic
 # ---------------------------------------------------------------------------
 
-def convert2md(file_path: str, use_claude: bool = True) -> str:
+def convert2md(file_path: str, claude: bool = False, firecrawl: bool = False) -> str:
     """Convert a document to Markdown.
 
-    Runs all applicable backends in parallel, then optionally merges via Claude.
-    Returns the Markdown string.
+    claude=False (default): MarkItDown only, fast, no API call.
+    claude=True: runs all backends in parallel, merges via Claude.
+    firecrawl=True: Firecrawl Document Parsing API.
     """
     file_path = os.path.abspath(file_path)
     if not os.path.isfile(file_path):
@@ -436,16 +526,42 @@ def convert2md(file_path: str, use_claude: bool = True) -> str:
     ext = detect_file_type(file_path)
     file_name = os.path.basename(file_path)
 
+    if firecrawl:
+        if ext not in FIRECRAWL_SUPPORTED_EXTENSIONS:
+            raise ValueError(
+                f"Firecrawl does not support {ext}\n"
+                f"Supported: {', '.join(sorted(FIRECRAWL_SUPPORTED_EXTENSIONS))}"
+            )
+        print(f"  📄 Converting {file_name} ({ext}) with Firecrawl...")
+        result = convert_firecrawl(file_path)
+        if result:
+            print(f"  ✅ [firecrawl] OK ({len(result):,} chars)")
+            return result
+        _notify("x2md", f"Firecrawl conversion failed for {file_name}")
+        print(f"\n❌ Firecrawl conversion failed for {file_name}", file=sys.stderr)
+        sys.exit(1)
+
     if ext not in CONVERTERS:
         raise ValueError(
             f"Unsupported file type: {ext}\n"
             f"Supported: {', '.join(sorted(SUPPORTED_EXTENSIONS))}"
         )
 
-    converters = CONVERTERS[ext]
-    print(f"  Converting {file_name} ({ext}) with {len(converters)} backend(s)...")
+    if not claude:
+        # Default mode: MarkItDown only
+        print(f"  📄 Converting {file_name} ({ext}) with markitdown...")
+        result = convert_markitdown(file_path)
+        if result:
+            print(f"  ✅ [markitdown] OK ({len(result):,} chars)")
+            return result
+        _notify("x2md", f"MarkItDown conversion failed for {file_name}")
+        print(f"\n❌ MarkItDown conversion failed for {file_name}", file=sys.stderr)
+        sys.exit(1)
 
-    # Run converters in parallel
+    # Claude mode: all backends in parallel + merge
+    converters = CONVERTERS[ext]
+    print(f"  📄 Converting {file_name} ({ext}) with {len(converters)} backend(s)...")
+
     results: dict[str, str] = {}
     with ThreadPoolExecutor(max_workers=len(converters)) as executor:
         future_to_name = {
@@ -458,41 +574,34 @@ def convert2md(file_path: str, use_claude: bool = True) -> str:
                 output = future.result()
                 if output:
                     results[name] = output
-                    print(f"  [{name}] OK ({len(output):,} chars)")
+                    print(f"  ✅ [{name}] OK ({len(output):,} chars)")
                 else:
-                    print(f"  [{name}] returned empty")
+                    print(f"  ⚠️ [{name}] returned empty")
             except Exception as e:
-                print(f"  [{name}] crashed: {e}", file=sys.stderr)
+                print(f"  ❌ [{name}] crashed: {e}", file=sys.stderr)
 
     if not results:
-        raise RuntimeError(f"All converters failed for {file_name}")
+        _notify("x2md", f"All converters failed for {file_name}")
+        print(f"\n❌ All converters failed for {file_name}", file=sys.stderr)
+        sys.exit(1)
 
-    # If only one converter produced output, return it directly
-    if len(results) == 1:
-        print(f"  Single converter succeeded, using directly.")
-        return list(results.values())[0]
+    print(f"  🔀 Merging {len(results)} outputs with Claude...")
+    merged = merge_with_claude(results, file_name)
+    if merged:
+        print(f"  ✅ [claude-merge] OK ({len(merged):,} chars)")
+        return merged
 
-    # Multiple outputs - merge with Claude if enabled
-    if use_claude and len(results) > 1:
-        print(f"  Merging {len(results)} outputs with Claude...")
-        merged = merge_with_claude(results, file_name)
-        if merged:
-            print(f"  [claude-merge] OK ({len(merged):,} chars)")
-            return merged
-        print(f"  [claude-merge] failed, falling back to best single output")
-
-    # Fallback: return the longest output (usually most complete)
-    best_name = max(results, key=lambda k: len(results[k]))
-    print(f"  Using [{best_name}] as best single output ({len(results[best_name]):,} chars)")
-    return results[best_name]
+    _notify("x2md", "Claude merge failed. No output produced.")
+    print(f"\n❌ Claude merge failed. Exiting without output.", file=sys.stderr)
+    sys.exit(1)
 
 
-def convert_and_save(file_path: str, output_path: str | None = None, use_claude: bool = True) -> str:
+def convert_and_save(file_path: str, output_path: str | None = None, claude: bool = False, firecrawl: bool = False) -> str:
     """Convert a document and save the Markdown to a file.
 
     Returns the output file path.
     """
-    markdown = convert2md(file_path, use_claude=use_claude)
+    markdown = convert2md(file_path, claude=claude, firecrawl=firecrawl)
 
     if output_path is None:
         base, _ = os.path.splitext(file_path)
@@ -508,40 +617,59 @@ def convert_and_save(file_path: str, output_path: str | None = None, use_claude:
 # CLI
 # ---------------------------------------------------------------------------
 
+def _notify(title: str, message: str) -> None:
+    """Send a macOS notification."""
+    subprocess.run([
+        'osascript', '-e',
+        f'display notification "{message}" with title "{title}"'
+    ], check=False)
+
+
+def _get_clipboard() -> str:
+    """Read the macOS clipboard contents."""
+    result = subprocess.run(['pbpaste'], capture_output=True, text=True, check=False)
+    return result.stdout.strip()
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
         description='Convert documents (PDF, DOCX, PPTX, TXT, etc.) to Markdown'
     )
-    parser.add_argument('input', nargs='?', help='File path to convert')
     parser.add_argument('-o', '--output', help='Output .md file path (default: same name as input)')
-    parser.add_argument('--no-claude', action='store_true', help='Skip Claude merge, use best single converter')
+    parser.add_argument('--claude', action='store_true', help='Use multiple backends + Claude merge (default: markitdown only)')
+    parser.add_argument('--firecrawl', action='store_true', help='Use Firecrawl Document Parsing API')
     parser.add_argument('--no-open', action='store_true', help='Do not open the output file in VS Code')
     args = parser.parse_args()
 
-    input_path = args.input
-    if not input_path:
-        input_path = input("\nEnter file path to convert: ").strip()
+    # Read file path from clipboard
+    input_path = _get_clipboard().strip("'\"")
 
-    # Strip quotes that might come from drag-and-drop
-    input_path = input_path.strip("'\"")
+    if not input_path:
+        msg = "Clipboard is empty. Copy a file path first."
+        print(f"\n❌ {msg}", file=sys.stderr)
+        _notify("x2md", msg)
+        sys.exit(1)
 
     if not os.path.isfile(input_path):
-        print(f"\nFile not found: {input_path}", file=sys.stderr)
+        msg = f"Not a valid file path: {input_path[:80]}"
+        print(f"\n❌ {msg}", file=sys.stderr)
+        _notify("x2md", msg)
         sys.exit(1)
 
     try:
         output_file = convert_and_save(
             input_path,
             output_path=args.output,
-            use_claude=not args.no_claude,
+            claude=args.claude,
+            firecrawl=args.firecrawl,
         )
-        print(f"\nMarkdown saved to: {output_file}")
+        print(f"\n✅ Markdown saved to: {output_file}")
 
         if not args.no_open:
             os.system(f"open -a 'Visual Studio Code' '{output_file}'")
 
     except Exception as e:
-        print(f"\nError: {e}", file=sys.stderr)
+        print(f"\n❌ Error: {e}", file=sys.stderr)
         sys.exit(1)
 
     print('\n-------------------------------')
