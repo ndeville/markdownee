@@ -619,9 +619,11 @@ def convert_and_save(file_path: str, output_path: str | None = None, claude: boo
 
 def _notify(title: str, message: str) -> None:
     """Send a macOS notification."""
+    safe_msg = message.replace('\\', '\\\\').replace('"', '\\"')
+    safe_title = title.replace('\\', '\\\\').replace('"', '\\"')
     subprocess.run([
         'osascript', '-e',
-        f'display notification "{message}" with title "{title}"'
+        f'display notification "{safe_msg}" with title "{safe_title}"'
     ], check=False)
 
 

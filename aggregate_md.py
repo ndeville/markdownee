@@ -164,7 +164,7 @@ if __name__ == '__main__':
     # print(f"count:\t\t{count:,}")
 
     """ CONFIGURATION """
-    input_folder = "/Users/nic/dl/engie-b2c-website"
+    input_folder = "/Users/nic/dl/intertek-website"
     # website_url = "https://www.abb.com"
     """"""
 

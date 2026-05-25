@@ -8,10 +8,21 @@ print(f"\n---------- {ts_time} starting {os.path.basename(__file__)}")
 import time
 start_time = time.time()
 
+from urllib.parse import urlparse as _urlparse_std
 from dotenv import load_dotenv
 load_dotenv()
 DB_BTOB = os.getenv("DB_BTOB")
 DB_MAILINGEE = os.getenv("DB_MAILINGEE")
+SCRAPE_PROXY = os.environ.get("SCRAPE_PROXY")
+
+def _parse_proxy(proxy_url: str) -> dict:
+    """Parse a SOCKS5 proxy URL into components for Playwright and requests."""
+    parsed = _urlparse_std(proxy_url)
+    return {
+        "server": f"{parsed.scheme}://{parsed.hostname}:{parsed.port}",
+        "username": parsed.username or "",
+        "password": parsed.password or "",
+    }
 
 import pprint
 pp = pprint.PrettyPrinter(indent=4)
@@ -77,10 +88,14 @@ def get_sitemap_urls(base_url: str, domain: str) -> set[str]:
         f"{base_url}/sitemap_index.xml",
         f"{base_url}/sitemap/sitemap.xml",
     ]
-    
+    req_proxies = {
+        "http": SCRAPE_PROXY,
+        "https": SCRAPE_PROXY,
+    } if SCRAPE_PROXY else None
+
     for sitemap_url in sitemap_locations:
         try:
-            resp = requests.get(sitemap_url, timeout=10)
+            resp = requests.get(sitemap_url, timeout=10, proxies=req_proxies)
             if resp.status_code == 200:
                 root = ET.fromstring(resp.content)
                 # Handle both sitemap index and regular sitemaps
@@ -133,6 +148,7 @@ def get_chrome_active_tab_url():
 # START_URL = input(f"\nEnter URL: ")
 START_URL = get_chrome_active_tab_url()
 
+FULL_SCRAPE = False  # False = home page + pages linked from it only; True = full recursive crawl
 MAX_PAGES = 10000  # safety limit
 
 count = 0
@@ -262,17 +278,32 @@ async def crawl():
     os.makedirs(OUT_DIR, exist_ok=True)
 
     visited = set()
-    to_visit = [START_URL]
+    to_visit = [(START_URL, 0)]
     domain = urlparse(START_URL).netloc
-    to_visit.extend(get_sitemap_urls(START_URL, domain))
+    if FULL_SCRAPE:
+        for sitemap_url in get_sitemap_urls(START_URL, domain):
+            to_visit.append((sitemap_url, 1))
+    else:
+        print(f"🔍 First-level scrape: home page + pages linked from it")
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+        launch_opts = {"headless": True}
+        if SCRAPE_PROXY:
+            proxy_info = _parse_proxy(SCRAPE_PROXY)
+            # Chromium doesn't support authenticated SOCKS5 - use HTTP instead
+            pw_server = proxy_info["server"].replace("socks5://", "http://")
+            launch_opts["proxy"] = {
+                "server": pw_server,
+                "username": proxy_info["username"],
+                "password": proxy_info["password"],
+            }
+            print(f"🔒 Using proxy: {pw_server}")
+        browser = await p.chromium.launch(**launch_opts)
         context = await browser.new_context()
         page = await context.new_page()
 
         while to_visit and len(visited) < MAX_PAGES:
-            url = to_visit.pop(0)
+            url, depth = to_visit.pop(0)
             if url in visited:
                 continue
 
@@ -310,14 +341,16 @@ async def crawl():
 
             count += 1
 
-            new_links = extract_links(html, url, domain)
-            for link in new_links:
-                if link not in visited:
-                    to_visit.append(link)
+            if FULL_SCRAPE or depth == 0:
+                new_links = extract_links(html, url, domain)
+                for link in new_links:
+                    if link not in visited:
+                        to_visit.append((link, depth + 1))
 
         await browser.close()
 
-    print(f"\n✅ Done! Saved {count}/{count_total} pages to {OUT_DIR}")
+    mode = "full recursive crawl" if FULL_SCRAPE else "first-level only (home + linked pages)"
+    print(f"\n✅ Done! Saved {count}/{count_total} pages to {OUT_DIR} [{mode}]")
 
 asyncio.run(crawl())
 
